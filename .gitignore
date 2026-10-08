@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.eve
+*.zip
+*.backup
+*.before_*
+.venv/
+venv/
+.env
+.env.*
+!.env.example
