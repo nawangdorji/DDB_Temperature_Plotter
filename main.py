@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.backends.backend_pdf import PdfPages
 
 from evb_reader import CDM_COUNT, DDB_COUNT, EVBReader, TemperatureData
 
@@ -314,12 +315,12 @@ class PlotCanvas(FigureCanvas):
                 handles,
                 labels,
                 loc="lower right",
-                bbox_to_anchor=(1.0, 1.015),
+                bbox_to_anchor=(0.5, 1.12),
                 ncol=4,
                 frameon=False,
-                fontsize=7.5,
-                handlelength=2.5,
-                columnspacing=1.2,
+                fontsize=7,
+                handlelength=1.5,
+                columnspacing=1.0,
                 borderaxespad=0.0,
             )
 
@@ -575,10 +576,15 @@ class MainWindow(QMainWindow):
         self.plot_button = QPushButton("Plot Temperatures")
         self.plot_button.clicked.connect(self.load_and_plot)
 
+        self.save_plots_button = QPushButton("Save Plots")
+        self.save_plots_button.clicked.connect(self.save_plots_pdf)
+        self.save_plots_button.setEnabled(False)
+
         self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(self.clear_all)
 
         controls.addWidget(self.plot_button)
+        controls.addWidget(self.save_plots_button)
         controls.addWidget(self.clear_button)
 
         controls.addStretch(1)
@@ -614,6 +620,7 @@ class MainWindow(QMainWindow):
         self.select_files_button.setStyleSheet(button_style)
         self.select_folder_button.setStyleSheet(button_style)
         self.plot_button.setStyleSheet(button_style)
+        self.save_plots_button.setStyleSheet(button_style)
         self.clear_button.setStyleSheet(button_style)
 
         main_layout.addLayout(controls)
@@ -809,6 +816,8 @@ class MainWindow(QMainWindow):
         for canvas in self.canvases:
             canvas.plot_data(data)
 
+        self.save_plots_button.setEnabled(total_points > 0)
+
         self.statusBar().showMessage(
             f"Plotting complete — {total_points:,} temperature records."
         )
@@ -831,9 +840,226 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.thread = None
 
+
+    def save_plots_pdf(self) -> None:
+        """Export all CDM plots as sharp, vector-based PDF pages."""
+        from pathlib import Path
+
+        total_points = EVBReader.total_points(self.data)
+
+        if total_points == 0:
+            QMessageBox.warning(
+                self,
+                "No data",
+                "Please plot EVB data before saving the plots.",
+            )
+            return
+
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save CDM Temperature Plots",
+            "DDB_Temperature_Plots.pdf",
+            "PDF files (*.pdf)",
+        )
+
+        if not output_path:
+            return
+
+        if not output_path.lower().endswith(".pdf"):
+            output_path += ".pdf"
+
+        try:
+            with PdfPages(output_path) as pdf:
+
+                # Four plots per landscape A4 page.
+                for start in range(0, len(self.canvases), 4):
+                    page = Figure(figsize=(11.69, 8.27))
+
+                    page.suptitle(
+                        "DDB Temperature vs Event Number",
+                        fontsize=14,
+                        fontweight="bold",
+                        y=0.975,
+                    )
+
+                    # Reserve a dedicated header area for every plot.
+                    grid = page.add_gridspec(
+                        2,
+                        2,
+                        left=0.075,
+                        right=0.98,
+                        bottom=0.075,
+                        top=0.90,
+                        wspace=0.24,
+                        hspace=0.42,
+                    )
+
+                    for local_index, canvas in enumerate(
+                        self.canvases[start:start + 4]
+                    ):
+                        row = local_index // 2
+                        col = local_index % 2
+
+                        # Each plot has its own header and graph axes.
+                        cell = grid[row, col].subgridspec(
+                            2,
+                            1,
+                            height_ratios=[0.24, 0.76],
+                            hspace=0.02,
+                        )
+
+                        header_ax = page.add_subplot(cell[0])
+                        ax = page.add_subplot(cell[1])
+
+                        header_ax.set_axis_off()
+
+                        source_ax = canvas.ax
+
+                        # CDM title: dedicated top line.
+                        header_ax.text(
+                            0.5,
+                            0.88,
+                            source_ax.get_title(),
+                            ha="center",
+                            va="center",
+                            fontsize=9,
+                            fontweight="bold",
+                            transform=header_ax.transAxes,
+                        )
+
+                        # Statistics: left side of the second header line.
+                        statistics = next(
+                            (
+                                item.get_text()
+                                for item in source_ax.texts
+                                if item.get_text().startswith("Mean:")
+                            ),
+                            None,
+                        )
+
+                        if statistics:
+                            header_ax.text(
+                                0.01,
+                                0.30,
+                                statistics,
+                                ha="left",
+                                va="center",
+                                fontsize=6.5,
+                                transform=header_ax.transAxes,
+                            )
+
+                        # Copy the DDB curves as vector graphics.
+                        for line in source_ax.lines:
+                            if line is canvas._hover_line:
+                                continue
+
+                            label = line.get_label()
+                            if not label.startswith("DDB "):
+                                continue
+
+                            ax.plot(
+                                line.get_xdata(),
+                                line.get_ydata(),
+                                color=line.get_color(),
+                                linestyle=line.get_linestyle(),
+                                linewidth=line.get_linewidth(),
+                                alpha=line.get_alpha(),
+                                marker=line.get_marker(),
+                                markersize=line.get_markersize(),
+                                markeredgewidth=line.get_markeredgewidth(),
+                                markeredgecolor=line.get_markeredgecolor(),
+                                markerfacecolor=line.get_markerfacecolor(),
+                                markevery=line.get_markevery(),
+                                label=label,
+                                zorder=line.get_zorder(),
+                            )
+
+                        ax.set_xlim(source_ax.get_xlim())
+                        ax.set_ylim(source_ax.get_ylim())
+
+                        ax.set_xlabel(
+                            source_ax.get_xlabel(),
+                            fontsize=8,
+                        )
+                        ax.set_ylabel(
+                            source_ax.get_ylabel(),
+                            fontsize=8,
+                        )
+                        ax.tick_params(
+                            axis="both",
+                            labelsize=7,
+                        )
+                        ax.grid(
+                            True,
+                            alpha=0.20,
+                            linewidth=0.7,
+                        )
+
+                        # Put the legend in the header's right-hand area.
+                        handles, labels = ax.get_legend_handles_labels()
+                        ordered = sorted(
+                            zip(handles, labels),
+                            key=lambda item: int(item[1].split()[-1]),
+                        )
+
+                        if ordered:
+                            handles, labels = zip(*ordered)
+
+                            header_ax.legend(
+                                handles,
+                                labels,
+                                loc="center right",
+                                bbox_to_anchor=(0.99, 0.30),
+                                ncol=4,
+                                frameon=False,
+                                fontsize=6.5,
+                                handlelength=1.3,
+                                columnspacing=0.8,
+                                borderaxespad=0,
+                            )
+
+                        # Preserve the empty-state message when applicable.
+                        no_data = any(
+                            item.get_text() == "No data"
+                            for item in source_ax.texts
+                        )
+
+                        if no_data:
+                            ax.text(
+                                0.5,
+                                0.5,
+                                "No data",
+                                ha="center",
+                                va="center",
+                                transform=ax.transAxes,
+                                fontsize=9,
+                            )
+
+                    pdf.savefig(page)
+
+            self.statusBar().showMessage(
+                f"PDF saved: {output_path}"
+            )
+
+            QMessageBox.information(
+                self,
+                "PDF saved",
+                "All 16 CDM plots were saved successfully:\n\n"
+                f"{Path(output_path)}",
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "PDF export failed",
+                f"Could not save the PDF:\n\n{exc}",
+            )
+
+
     def clear_all(self) -> None:
         self.data = defaultdict(lambda: defaultdict(list))
         self.progress.setValue(0)
+        self.save_plots_button.setEnabled(False)
 
         for canvas in self.canvases:
             canvas.clear_plot()
